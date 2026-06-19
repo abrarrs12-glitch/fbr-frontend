@@ -1,0 +1,311 @@
+// ============================================================
+//  src/pages/InvoicesPage.jsx
+//  - Select a customer from the sidebar
+//  - Upload FBR Excel file
+//  - View invoices with filters
+//  - Sync to FBR with one click
+// ============================================================
+
+import { useState, useEffect, useRef } from 'react';
+import { customersApi, invoicesApi, fbrApi } from '../services/api';
+import { format } from 'date-fns';
+import toast from 'react-hot-toast';
+
+export default function InvoicesPage() {
+  const [customers, setCustomers]   = useState([]);
+  const [activeId, setActiveId]     = useState(null);
+  const [stats, setStats]           = useState({});
+  const [invoices, setInvoices]     = useState([]);
+  const [total, setTotal]           = useState(0);
+  const [statusFilter, setStatus]   = useState('all');
+  const [loadingInv, setLoadingInv] = useState(false);
+  const [syncing, setSyncing]       = useState(false);
+  const [uploading, setUploading]   = useState(false);
+  const [uploadPct, setUploadPct]   = useState(0);
+  const [dragOver, setDragOver]     = useState(false);
+  const fileInput = useRef(null);
+
+  // Load customer list once
+  useEffect(() => {
+    customersApi.list().then(data => {
+      setCustomers(data);
+      if (data.length > 0) setActiveId(data[0]._id);
+    }).catch(() => toast.error('Failed to load customers'));
+  }, []);
+
+  // Load invoices + stats when customer or filter changes
+  useEffect(() => {
+    if (!activeId) return;
+    loadInvoices();
+    loadStats();
+  }, [activeId, statusFilter]);
+
+  const loadInvoices = async () => {
+    setLoadingInv(true);
+    try {
+      const params = { customerId: activeId, limit: 100 };
+      if (statusFilter !== 'all') params.status = statusFilter;
+      const data = await invoicesApi.list(params);
+      setInvoices(data.invoices || []);
+      setTotal(data.total || 0);
+    } catch { toast.error('Failed to load invoices'); }
+    finally { setLoadingInv(false); }
+  };
+
+  const loadStats = async () => {
+    try { setStats(await invoicesApi.stats(activeId)); }
+    catch { setStats({}); }
+  };
+
+  // ── File upload ────────────────────────────────────────────
+  const handleFile = async (file) => {
+    if (!activeId) { toast.error('Please select a customer first'); return; }
+    if (!file) return;
+
+    const ext = file.name.split('.').pop().toLowerCase();
+    if (!['xlsx','xls'].includes(ext)) {
+      toast.error('Please upload an Excel file (.xlsx or .xls)');
+      return;
+    }
+
+    setUploading(true);
+    setUploadPct(0);
+    try {
+      const result = await invoicesApi.upload(activeId, file, setUploadPct);
+      toast.success(`✓ Imported ${result.inserted} invoice(s)`);
+      if (result.duplicates > 0) toast(`${result.duplicates} duplicate(s) skipped`, { icon: 'ℹ️' });
+      if (result.parseErrors > 0) toast.error(`${result.parseErrors} row(s) had errors — check console`);
+      loadInvoices();
+      loadStats();
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Upload failed');
+    } finally { setUploading(false); }
+  };
+
+  const handleDrop = (e) => {
+    e.preventDefault(); setDragOver(false);
+    handleFile(e.dataTransfer.files[0]);
+  };
+
+  // ── Sync all pending to FBR ────────────────────────────────
+  const handleSync = async () => {
+    if (!activeId) return;
+    setSyncing(true);
+    const t = toast.loading('Syncing with FBR portal…');
+    try {
+      const result = await fbrApi.syncAll(activeId);
+      toast.dismiss(t);
+      toast.success(`FBR sync done: ${result.succeeded} submitted, ${result.failed} failed`);
+      loadInvoices(); loadStats();
+    } catch (err) {
+      toast.dismiss(t);
+      toast.error(err.response?.data?.error || 'Sync failed');
+    } finally { setSyncing(false); }
+  };
+
+  // ── Submit single invoice ──────────────────────────────────
+  const handleSubmitOne = async (invoiceId) => {
+    try {
+      const r = await fbrApi.submitOne(invoiceId);
+      toast.success(r.message);
+      loadInvoices(); loadStats();
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Submission failed');
+    }
+  };
+
+  // ── Delete invoice ─────────────────────────────────────────
+  const handleDelete = async (id, num) => {
+    if (!window.confirm(`Delete invoice ${num}?`)) return;
+    try {
+      await invoicesApi.remove(id);
+      toast.success('Invoice deleted');
+      loadInvoices(); loadStats();
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Delete failed');
+    }
+  };
+
+  const activeCustomer = customers.find(c => c._id === activeId);
+  const pendingCount = stats.pending || 0;
+
+  return (
+    <div className="page-enter" style={{ display:'flex', gap:20, alignItems:'flex-start' }}>
+
+      {/* ── Customer sidebar ────────────────────────────────── */}
+      <div style={{ width:200, flexShrink:0 }}>
+        <div style={{ fontSize:11, fontWeight:600, color:'var(--text-light)', textTransform:'uppercase', letterSpacing:'.06em', marginBottom:8 }}>
+          Customers
+        </div>
+        {customers.map((c, i) => (
+          <button key={c._id} onClick={() => { setActiveId(c._id); setStatus('all'); }}
+            style={{
+              width:'100%', display:'flex', alignItems:'center', gap:8,
+              padding:'9px 10px', borderRadius:'var(--radius)',
+              border: activeId === c._id ? '1px solid var(--accent)' : '1px solid transparent',
+              background: activeId === c._id ? 'var(--accent-lt)' : 'transparent',
+              marginBottom:2, cursor:'pointer', transition:'all .15s',
+              textAlign:'left',
+            }}>
+            <div style={{
+              width:28, height:28, borderRadius:7, flexShrink:0,
+              background:'var(--bg-sidebar)', color:'#aaa',
+              display:'flex', alignItems:'center', justifyContent:'center',
+              fontSize:10, fontWeight:700,
+            }}>
+              {c.businessName.split(' ').map(w=>w[0]).join('').slice(0,2).toUpperCase()}
+            </div>
+            <div style={{ minWidth:0 }}>
+              <div style={{ fontSize:12, fontWeight:500, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap', color: activeId===c._id ? 'var(--accent-dk)' : 'var(--text)' }}>
+                {c.businessName}
+              </div>
+              <div style={{ fontSize:10, color:'var(--text-light)', fontFamily:'var(--font-mono)' }}>{c.ntn}</div>
+            </div>
+          </button>
+        ))}
+      </div>
+
+      {/* ── Main panel ──────────────────────────────────────── */}
+      <div style={{ flex:1, minWidth:0 }}>
+        {!activeCustomer ? (
+          <div className="card"><div className="empty-state"><p>Select a customer to view invoices.</p></div></div>
+        ) : (
+          <>
+            {/* Header */}
+            <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:20 }}>
+              <div>
+                <h1 style={{ fontSize:20, fontWeight:600 }}>{activeCustomer.businessName}</h1>
+                <div style={{ fontSize:12, color:'var(--text-muted)', marginTop:2, fontFamily:'var(--font-mono)' }}>
+                  NTN: {activeCustomer.ntn} · STRN: {activeCustomer.strn || '—'}
+                </div>
+              </div>
+              <button
+                className="btn btn-primary"
+                onClick={handleSync}
+                disabled={syncing || pendingCount === 0}
+              >
+                {syncing ? <><span className="spinner" style={{ width:14, height:14, borderWidth:2, borderTopColor:'rgba(255,255,255,.7)', borderColor:'rgba(255,255,255,.3)' }}/> Syncing…</> : `↑ Sync to FBR ${pendingCount > 0 ? `(${pendingCount} pending)` : ''}`}
+              </button>
+            </div>
+
+            {/* Stats */}
+            <div className="stat-grid">
+              {[
+                { label:'Total',     value: (stats.pending||0)+(stats.submitted||0)+(stats.accepted||0)+(stats.rejected||0), color:'' },
+                { label:'Accepted',  value: stats.accepted||0, color:'var(--success)' },
+                { label:'Pending',   value: stats.pending||0,  color:'var(--warning)' },
+                { label:'Rejected',  value: stats.rejected||0, color:'var(--danger)'  },
+              ].map(s => (
+                <div key={s.label} className="stat-card">
+                  <div className="stat-label">{s.label}</div>
+                  <div className="stat-value" style={{ color: s.color || 'inherit' }}>{s.value}</div>
+                </div>
+              ))}
+            </div>
+
+            {/* Upload zone */}
+            <div
+              className={`upload-zone ${dragOver ? 'drag-over' : ''}`}
+              style={{ marginBottom:20 }}
+              onClick={() => !uploading && fileInput.current.click()}
+              onDragOver={e => { e.preventDefault(); setDragOver(true); }}
+              onDragLeave={() => setDragOver(false)}
+              onDrop={handleDrop}
+            >
+              <input ref={fileInput} type="file" accept=".xlsx,.xls" onChange={e => handleFile(e.target.files[0])} />
+              {uploading ? (
+                <div>
+                  <div style={{ fontSize:13, fontWeight:500, marginBottom:8 }}>Uploading… {uploadPct}%</div>
+                  <div style={{ background:'var(--border)', borderRadius:4, height:4, overflow:'hidden' }}>
+                    <div style={{ height:'100%', background:'var(--accent)', width:`${uploadPct}%`, transition:'width .2s' }}/>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" style={{ marginBottom:8 }}>
+                    <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
+                    <polyline points="17 8 12 3 7 8"/>
+                    <line x1="12" y1="3" x2="12" y2="15"/>
+                  </svg>
+                  <div style={{ fontWeight:500, fontSize:13, marginBottom:4 }}>Drop FBR Excel file here or click to browse</div>
+                  <div style={{ fontSize:12 }}>Accepts .xlsx and .xls — FBR standard format</div>
+                </>
+              )}
+            </div>
+
+            {/* Invoices table */}
+            <div className="card" style={{ padding:0, overflow:'hidden' }}>
+              <div style={{ padding:'14px 20px', borderBottom:'1px solid var(--border)', display:'flex', gap:8, alignItems:'center' }}>
+                <span style={{ fontSize:13, fontWeight:600, marginRight:'auto' }}>
+                  Invoices {total > 0 && <span style={{ color:'var(--text-muted)', fontWeight:400 }}>({total})</span>}
+                </span>
+                {['all','pending','submitted','accepted','rejected'].map(s => (
+                  <button key={s} onClick={() => setStatus(s)}
+                    className="btn btn-sm"
+                    style={{ background: statusFilter===s ? 'var(--text)' : '', color: statusFilter===s ? '#fff' : '', borderColor: statusFilter===s ? 'var(--text)' : '' }}>
+                    {s === 'all' ? 'All' : s.charAt(0).toUpperCase()+s.slice(1)}
+                  </button>
+                ))}
+              </div>
+
+              {loadingInv ? (
+                <div style={{ display:'flex', justifyContent:'center', padding:40 }}><div className="spinner"/></div>
+              ) : invoices.length === 0 ? (
+                <div className="empty-state">
+                  <p>{statusFilter === 'all' ? 'No invoices yet. Upload an Excel file above.' : `No ${statusFilter} invoices.`}</p>
+                </div>
+              ) : (
+                <div className="table-wrap">
+                  <table>
+                    <thead><tr>
+                      <th>Invoice No</th><th>Buyer</th><th>Buyer NTN</th><th>Amount (PKR)</th><th>Tax (PKR)</th><th>Date</th><th>Status</th><th>IRN</th><th></th>
+                    </tr></thead>
+                    <tbody>
+                      {invoices.map(inv => (
+                        <tr key={inv._id}>
+                          <td style={{ fontFamily:'var(--font-mono)', fontSize:12 }}>{inv.invoiceNumber}</td>
+                          <td style={{ maxWidth:140, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{inv.buyerName || '—'}</td>
+                          <td style={{ fontFamily:'var(--font-mono)', fontSize:11, color:'var(--text-muted)' }}>{inv.buyerNtn || '—'}</td>
+                          <td style={{ fontWeight:500 }}>{inv.totalAmount?.toLocaleString()}</td>
+                          <td>{inv.taxAmount?.toLocaleString()}</td>
+                          <td style={{ color:'var(--text-muted)', whiteSpace:'nowrap' }}>{inv.invoiceDate ? format(new Date(inv.invoiceDate),'dd/MM/yy') : '—'}</td>
+                          <td><span className={`badge badge-${inv.status}`}>{inv.status}</span></td>
+                          <td style={{ fontFamily:'var(--font-mono)', fontSize:11, color:'var(--text-light)' }}>
+                            {inv.irn || '—'}
+                          </td>
+                          <td>
+                            <div style={{ display:'flex', gap:4' }}>
+                              {inv.status === 'pending' && (
+                                <button className="btn btn-sm" onClick={() => handleSubmitOne(inv._id)}>Submit</button>
+                              )}
+                              {inv.status !== 'accepted' && (
+                                <button className="btn btn-sm btn-danger" onClick={() => handleDelete(inv._id, inv.invoiceNumber)}>×</button>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+
+            {/* Rejection notes (if any) */}
+            {invoices.some(i => i.status === 'rejected' && i.rejectionNote) && (
+              <div className="card" style={{ marginTop:16, borderColor:'var(--danger)', borderWidth:1 }}>
+                <div style={{ fontSize:13, fontWeight:600, color:'var(--danger)', marginBottom:10 }}>Rejection notes from FBR</div>
+                {invoices.filter(i => i.status==='rejected' && i.rejectionNote).map(inv => (
+                  <div key={inv._id} style={{ display:'flex', gap:12, marginBottom:8, fontSize:13 }}>
+                    <span style={{ fontFamily:'var(--font-mono)', color:'var(--text-muted)', whiteSpace:'nowrap' }}>{inv.invoiceNumber}</span>
+                    <span style={{ color:'var(--danger)' }}>{inv.rejectionNote}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
